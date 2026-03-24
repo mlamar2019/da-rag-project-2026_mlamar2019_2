@@ -2,12 +2,30 @@
 
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from typing import List
+from unittest.mock import patch
 
 import pytest
 from llama_index.core import Document
+from llama_index.core.embeddings import BaseEmbedding
 
 from ingestion import VectorStoreManager
+
+
+class MockEmbedding(BaseEmbedding):
+    """Minimal concrete BaseEmbedding subclass for testing without Azure credentials."""
+
+    def _get_query_embedding(self, query: str) -> List[float]:
+        return [0.1] * 8
+
+    def _get_text_embedding(self, text: str) -> List[float]:
+        return [0.1] * 8
+
+    async def _aget_query_embedding(self, query: str) -> List[float]:
+        return [0.1] * 8
+
+    async def _aget_text_embedding(self, text: str) -> List[float]:
+        return [0.1] * 8
 
 
 @pytest.fixture
@@ -18,27 +36,10 @@ def temp_store_dir():
 
 
 @pytest.fixture
-def mock_embedding_model():
-    """Mock embedding model to avoid Azure authentication in tests."""
-    mock = MagicMock()
-    # Make it look like a proper embedding model
-    mock.get_text_embedding = MagicMock(return_value=[0.1] * 1536)
-    mock.get_text_embedding_batch = MagicMock(return_value=[[0.1] * 1536])
-    mock._get_text_embedding = MagicMock(return_value=[0.1] * 1536)
-    mock._get_text_embeddings = MagicMock(return_value=[[0.1] * 1536])
-    return mock
-
-
-@pytest.fixture
 def vector_store_manager_with_mock(temp_store_dir):
-    """Vector store manager fixture that patches the embedding model."""
-    with patch("ingestion.get_embedding_model") as mock_get_model:
-        mock_model = MagicMock()
-        mock_model.get_text_embedding = MagicMock(return_value=[0.1] * 1536)
-        mock_model.get_text_embedding_batch = MagicMock(return_value=[[0.1] * 1536])
-        mock_get_model.return_value = mock_model
-        manager = VectorStoreManager(persist_dir=temp_store_dir)
-        yield manager
+    """Vector store manager with a real BaseEmbedding subclass that avoids Azure auth."""
+    manager = VectorStoreManager(persist_dir=temp_store_dir, embedding_model=MockEmbedding())
+    return manager
 
 
 class TestVectorStoreManagerInitialization:
