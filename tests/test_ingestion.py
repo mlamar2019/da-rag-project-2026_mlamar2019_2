@@ -206,6 +206,22 @@ class TestVectorStoreQuery:
         assert "Earth is the third planet." in prompt
         assert "Title: Earth" in prompt
 
+    def test_build_augmented_prompt_truncates_context(self, temp_store_dir):
+        """Verify prompt context respects the configured character limit."""
+        manager = VectorStoreManager(
+            persist_dir=temp_store_dir,
+            embedding_model=MockEmbedding(),
+            chat_model=MockChatModel(),
+            context_char_limit=100,
+        )
+        long_text = "A" * 140
+        prompt = manager.build_augmented_prompt(
+            query_str="test",
+            retrieved_docs=[{"text": long_text, "metadata": {"title": "Long"}}],
+        )
+        assert "A" * 100 in prompt
+        assert "A" * 120 not in prompt
+
     def test_answer_query_returns_prompt_and_answer(self, vector_store_manager_with_mock):
         """Verify full answer_query flow returns embedding, retrieval, prompt, and answer."""
         vector_store_manager_with_mock.add_documents(
@@ -220,6 +236,23 @@ class TestVectorStoreQuery:
         assert len(result["results"]) == 1
         assert "Question: What is Python?" in result["prompt"]
         assert result["answer"].startswith("mock-answer::")
+
+    def test_answer_query_uses_cache(self, vector_store_manager_with_mock):
+        """Verify repeated query calls reuse cached answer generation results."""
+        vector_store_manager_with_mock.add_documents(
+            [Document(text="Python is a programming language.", metadata={"title": "Python"})]
+        )
+
+        with patch.object(
+            vector_store_manager_with_mock,
+            "generate_answer_text",
+            wraps=vector_store_manager_with_mock.generate_answer_text,
+        ) as wrapped:
+            first = vector_store_manager_with_mock.answer_query("What is Python?", top_k=1)
+            second = vector_store_manager_with_mock.answer_query("What is Python?", top_k=1)
+
+        assert first["answer"] == second["answer"]
+        assert wrapped.call_count == 1
 
 
 class TestCreateOrLoadIndex:

@@ -8,6 +8,7 @@ This module handles:
 """
 
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from llama_index.core import VectorStoreIndex, Document
@@ -127,6 +128,8 @@ class VectorStoreManager:
         persist_dir: Path | None = None,
         embedding_model: BaseEmbedding | None = None,
         chat_model: Any | None = None,
+        context_char_limit: int = 600,
+        answer_cache_size: int = 256,
     ):
         """Initialize vector store manager.
         
@@ -139,6 +142,10 @@ class VectorStoreManager:
         self.index: VectorStoreIndex | None = None
         self._embedding_model = embedding_model
         self._chat_model = chat_model
+        self.context_char_limit = max(100, context_char_limit)
+        self.answer_cache_size = max(1, answer_cache_size)
+        self._answer_cache: dict[tuple[str, int], dict[str, Any]] = {}
+        self._cache_lock = Lock()
 
     @property
     def embedding_model(self):
@@ -151,8 +158,14 @@ class VectorStoreManager:
     def chat_model(self):
         """Lazy-load chat model on first access."""
         if self._chat_model is None:
-            self._chat_model = get_chat_model()
+            # Deterministic generation reduces response variance during evaluation.
+            self._chat_model = get_chat_model(temperature=0)
         return self._chat_model
+
+    @staticmethod
+    def _normalize_query(query_str: str) -> str:
+        """Normalize user query for consistent caching and embedding calls."""
+        return " ".join(query_str.strip().split())
 
     def create_or_load_index(self) -> VectorStoreIndex:
         """Create a new vector store index or load an existing one.
@@ -244,8 +257,11 @@ class VectorStoreManager:
         if self.index is None:
             return []
 
+        normalized_query = self._normalize_query(query_str)
+        top_k = max(1, top_k)
+
         retriever = self.index.as_retriever(similarity_top_k=top_k)
-        query_bundle = QueryBundle(query_str=query_str, embedding=query_embedding)
+        query_bundle = QueryBundle(query_str=normalized_query, embedding=query_embedding)
         results = retriever.retrieve(query_bundle)
 
         return [
@@ -262,25 +278,29 @@ class VectorStoreManager:
         if self.index is None:
             return []
 
-        query_embedding = self.generate_query_embedding(query_str)
-        return self.retrieve(query_str=query_str, top_k=top_k, query_embedding=query_embedding)
+        normalized_query = self._normalize_query(query_str)
+        query_embedding = self.generate_query_embedding(normalized_query)
+        return self.retrieve(query_str=normalized_query, top_k=top_k, query_embedding=query_embedding)
 
     def build_augmented_prompt(self, query_str: str, retrieved_docs: list[dict[str, Any]]) -> str:
         """Build a context-augmented prompt from retrieved results."""
+        normalized_query = self._normalize_query(query_str)
         if not retrieved_docs:
             context_block = "No supporting context was retrieved."
         else:
             context_parts: list[str] = []
             for idx, doc in enumerate(retrieved_docs, start=1):
                 title = doc.get("metadata", {}).get("title") or "Untitled"
-                context_parts.append(f"[{idx}] Title: {title}\n{doc.get('text', '')}")
+                text = str(doc.get("text", ""))[: self.context_char_limit]
+                context_parts.append(f"[{idx}] Title: {title}\n{text}")
             context_block = "\n\n".join(context_parts)
 
         return (
             "You are a helpful assistant. Answer the user question using only the provided context. "
-            "If the context does not contain enough information, say you do not know.\n\n"
+            "If the context does not contain enough information, say you do not know. "
+            "Respond in 1-2 concise sentences.\n\n"
             f"Context:\n{context_block}\n\n"
-            f"Question: {query_str}\n"
+            f"Question: {normalized_query}\n"
             "Answer:"
         )
 
@@ -293,16 +313,33 @@ class VectorStoreManager:
 
     def answer_query(self, query_str: str, top_k: int = 5) -> dict[str, Any]:
         """Run retrieval-augmented generation for a query and return full flow details."""
-        query_embedding = self.generate_query_embedding(query_str)
-        results = self.retrieve(query_str=query_str, top_k=top_k, query_embedding=query_embedding)
-        augmented_prompt = self.build_augmented_prompt(query_str=query_str, retrieved_docs=results)
+        normalized_query = self._normalize_query(query_str)
+        cache_key = (normalized_query, max(1, top_k))
+
+        with self._cache_lock:
+            cached = self._answer_cache.get(cache_key)
+        if cached is not None:
+            return cached.copy()
+
+        query_embedding = self.generate_query_embedding(normalized_query)
+        results = self.retrieve(query_str=normalized_query, top_k=top_k, query_embedding=query_embedding)
+        augmented_prompt = self.build_augmented_prompt(query_str=normalized_query, retrieved_docs=results)
         answer = self.generate_answer_text(augmented_prompt)
 
-        return {
-            "query": query_str,
+        result = {
+            "query": normalized_query,
             "top_k": top_k,
             "embedding": query_embedding,
             "results": results,
             "prompt": augmented_prompt,
             "answer": answer,
         }
+
+        with self._cache_lock:
+            if len(self._answer_cache) >= self.answer_cache_size:
+                # Simple bounded cache eviction: remove oldest inserted key.
+                oldest_key = next(iter(self._answer_cache))
+                self._answer_cache.pop(oldest_key, None)
+            self._answer_cache[cache_key] = result.copy()
+
+        return result

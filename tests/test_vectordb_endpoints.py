@@ -220,11 +220,15 @@ class TestVectorStoreQueryEndpoint:
         monkeypatch.setattr("main.load_qa_pairs_from_parquet", _mock_qa_loader)
         app.dependency_overrides[get_vector_store] = _override_store
         try:
-            response = client.post("/rag/evaluate", json={"source": "mock://qa", "limit": 2, "top_k": 1})
+            response = client.post(
+                "/rag/evaluate",
+                json={"source": "mock://qa", "limit": 2, "top_k": 1, "max_workers": 2},
+            )
             data = response.json()
             assert response.status_code == 200
             assert data["summary"]["total"] == 2
             assert len(data["items"]) == 2
+            assert data["max_workers"] == 2
             assert "exact_match_rate" in data["summary"]
             assert "contains_expected_rate" in data["summary"]
         finally:

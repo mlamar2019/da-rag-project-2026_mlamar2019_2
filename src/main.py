@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends
 from pydantic import BaseModel
+from concurrent.futures import ThreadPoolExecutor
 
 from ingestion import (
     VectorStoreManager,
@@ -98,6 +99,7 @@ class RagEvaluationRequest(BaseModel):
     source: str = DEFAULT_TEST_QA_SOURCE
     limit: int = 5
     top_k: int = 5
+    max_workers: int = 3
 
 
 class RagEvaluationItem(BaseModel):
@@ -118,6 +120,7 @@ class RagEvaluationResponse(BaseModel):
     source: str
     limit: int
     top_k: int
+    max_workers: int
     summary: RagEvaluationSummary
     items: list[RagEvaluationItem]
 
@@ -226,23 +229,27 @@ def rag_evaluate(
 ) -> RagEvaluationResponse:
     """Evaluate RAG answers against a question/answer parquet dataset."""
     qa_pairs = load_qa_pairs_from_parquet(source=payload.source, limit=payload.limit)
-    items: list[RagEvaluationItem] = []
 
-    for qa in qa_pairs:
+    def _evaluate_item(qa: dict[str, str]) -> RagEvaluationItem:
         rag_result = store.answer_query(query_str=qa["question"], top_k=payload.top_k)
         exact_match, contains_expected = evaluate_generated_answer(
             expected_answer=qa["answer"],
             generated_answer=rag_result["answer"],
         )
-        items.append(
-            RagEvaluationItem(
-                question=qa["question"],
-                expected_answer=qa["answer"],
-                generated_answer=rag_result["answer"],
-                exact_match=exact_match,
-                contains_expected=contains_expected,
-            )
+        return RagEvaluationItem(
+            question=qa["question"],
+            expected_answer=qa["answer"],
+            generated_answer=rag_result["answer"],
+            exact_match=exact_match,
+            contains_expected=contains_expected,
         )
+
+    max_workers = min(max(payload.max_workers, 1), 8)
+    if max_workers == 1:
+        items = [_evaluate_item(qa) for qa in qa_pairs]
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            items = list(executor.map(_evaluate_item, qa_pairs))
 
     total = len(items)
     exact_match_rate = (sum(1 for item in items if item.exact_match) / total) if total else 0.0
@@ -252,6 +259,7 @@ def rag_evaluate(
         source=payload.source,
         limit=payload.limit,
         top_k=payload.top_k,
+        max_workers=max_workers,
         summary=RagEvaluationSummary(
             total=total,
             exact_match_rate=exact_match_rate,
