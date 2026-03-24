@@ -51,6 +51,30 @@ class AuthStatusResponse(BaseModel):
     error: str | None = None
 
 
+class QueryRequest(BaseModel):
+    query: str
+    top_k: int = 5
+
+
+class QueryEmbeddingResponse(BaseModel):
+    query: str
+    embedding: list[float]
+    dimensions: int
+
+
+class RetrievedDocument(BaseModel):
+    text: str
+    score: float | None = None
+    metadata: dict
+
+
+class QueryResponse(BaseModel):
+    query: str
+    top_k: int
+    embedding: list[float]
+    results: list[RetrievedDocument]
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -82,6 +106,40 @@ def query_vectordb(
 ) -> list[dict]:
     """Query the vector database for similar documents."""
     return store.query(q, top_k=top_k)
+
+
+@app.post("/vectordb/query/embedding", response_model=QueryEmbeddingResponse)
+def embed_query(
+    payload: QueryRequest,
+    store: VectorStoreManager = Depends(get_vector_store),
+) -> QueryEmbeddingResponse:
+    """Generate an embedding for a user query."""
+    embedding = store.generate_query_embedding(payload.query)
+    return QueryEmbeddingResponse(
+        query=payload.query,
+        embedding=embedding,
+        dimensions=len(embedding),
+    )
+
+
+@app.post("/vectordb/query", response_model=QueryResponse)
+def query_vectordb_post(
+    payload: QueryRequest,
+    store: VectorStoreManager = Depends(get_vector_store),
+) -> QueryResponse:
+    """Embed a query, run similarity search, and return retrieved documents."""
+    embedding = store.generate_query_embedding(payload.query)
+    results = store.retrieve(
+        query_str=payload.query,
+        top_k=payload.top_k,
+        query_embedding=embedding,
+    )
+    return QueryResponse(
+        query=payload.query,
+        top_k=payload.top_k,
+        embedding=embedding,
+        results=[RetrievedDocument(**result) for result in results],
+    )
 
 
 @app.post("/vectordb/ingest", response_model=IngestResponse)

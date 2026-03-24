@@ -126,6 +126,12 @@ class TestDocumentAddition:
 class TestVectorStoreQuery:
     """Tests for querying the vector store."""
 
+    def test_generate_query_embedding_returns_vector(self, vector_store_manager_with_mock):
+        """Verify query embedding generation returns an embedding vector."""
+        embedding = vector_store_manager_with_mock.generate_query_embedding("test query")
+        assert isinstance(embedding, list)
+        assert len(embedding) == 8
+
     def test_query_on_uninitialized_store_returns_empty(self, vector_store_manager_with_mock):
         """Verify that querying uninitialized store returns empty list."""
         results = vector_store_manager_with_mock.query("test query")
@@ -139,11 +145,15 @@ class TestVectorStoreQuery:
 
     def test_query_result_structure(self, vector_store_manager_with_mock):
         """Verify that query results have expected structure."""
-        doc = Document(text="Test document content")
+        doc = Document(text="Test document content", metadata={"title": "Doc 1", "id": "abc"})
         vector_store_manager_with_mock.add_documents([doc])
         results = vector_store_manager_with_mock.query("test", top_k=1)
-        # Results might be empty if no actual embeddings, but structure should be consistent
         assert isinstance(results, list)
+        assert results
+        assert results[0]["text"] == "Test document content"
+        assert "score" in results[0]
+        assert results[0]["metadata"]["title"] == "Doc 1"
+        assert results[0]["metadata"]["id"] == "abc"
 
     def test_query_respects_top_k_parameter(self, vector_store_manager_with_mock):
         """Verify that query respects the top_k parameter."""
@@ -151,6 +161,21 @@ class TestVectorStoreQuery:
         vector_store_manager_with_mock.add_documents(docs)
         results = vector_store_manager_with_mock.query("document", top_k=2)
         assert len(results) <= 2
+
+    def test_retrieve_accepts_precomputed_embedding(self, vector_store_manager_with_mock):
+        """Verify retrieval can reuse a precomputed embedding."""
+        docs = [Document(text="Document 1", metadata={"title": "Doc 1"})]
+        vector_store_manager_with_mock.add_documents(docs)
+
+        query_embedding = vector_store_manager_with_mock.generate_query_embedding("document")
+        results = vector_store_manager_with_mock.retrieve(
+            "document",
+            top_k=1,
+            query_embedding=query_embedding,
+        )
+
+        assert len(results) == 1
+        assert results[0]["metadata"]["title"] == "Doc 1"
 
 
 class TestCreateOrLoadIndex:

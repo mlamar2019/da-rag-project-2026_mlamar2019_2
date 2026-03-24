@@ -82,6 +82,78 @@ class TestVectorStoreQueryEndpoint:
         response = client.get("/vectordb/query", params={"q": "test"})
         assert response.status_code == 200
 
+    def test_query_embedding_endpoint_returns_embedding(self, monkeypatch):
+        """Verify POST query embedding endpoint returns embedding details."""
+        store = _build_test_store()
+
+        def _override_store() -> VectorStoreManager:
+            return store
+
+        app.dependency_overrides[get_vector_store] = _override_store
+        try:
+            response = client.post("/vectordb/query/embedding", json={"query": "test query", "top_k": 2})
+            data = response.json()
+            assert response.status_code == 200
+            assert data["query"] == "test query"
+            assert data["dimensions"] == 8
+            assert len(data["embedding"]) == 8
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_post_query_returns_structured_results(self):
+        """Verify POST query endpoint returns query, embedding, and results."""
+        store = _build_test_store()
+        store.add_documents([
+            Document(text="Artificial intelligence is the simulation of human intelligence.", metadata={"title": "AI"}),
+            Document(text="Biology studies living organisms.", metadata={"title": "Biology"}),
+        ])
+
+        def _override_store() -> VectorStoreManager:
+            return store
+
+        app.dependency_overrides[get_vector_store] = _override_store
+        try:
+            response = client.post("/vectordb/query", json={"query": "What is artificial intelligence?", "top_k": 1})
+            data = response.json()
+            assert response.status_code == 200
+            assert data["query"] == "What is artificial intelligence?"
+            assert data["top_k"] == 1
+            assert len(data["embedding"]) == 8
+            assert len(data["results"]) <= 1
+            assert "text" in data["results"][0]
+            assert "score" in data["results"][0]
+            assert "metadata" in data["results"][0]
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_query_retrieval_end_to_end_after_ingest(self, monkeypatch):
+        """Verify ingest then query works end to end through the API."""
+        store = _build_test_store()
+
+        def _override_store() -> VectorStoreManager:
+            return store
+
+        def _mock_loader(source: str, limit: int | None = None) -> list[Document]:
+            return [
+                Document(text="Artificial intelligence is the simulation of human intelligence.", metadata={"title": "AI", "id": "1"}),
+                Document(text="Machine learning is a subset of artificial intelligence.", metadata={"title": "ML", "id": "2"}),
+            ]
+
+        monkeypatch.setattr("ingestion.load_documents_from_parquet", _mock_loader)
+        app.dependency_overrides[get_vector_store] = _override_store
+        try:
+            ingest_response = client.post("/vectordb/ingest", json={"source": "mock://source", "limit": 2})
+            assert ingest_response.status_code == 200
+
+            query_response = client.post("/vectordb/query", json={"query": "artificial intelligence", "top_k": 2})
+            data = query_response.json()
+            assert query_response.status_code == 200
+            assert data["query"] == "artificial intelligence"
+            assert len(data["results"]) >= 1
+            assert any(result["metadata"]["title"] in {"AI", "ML"} for result in data["results"])
+        finally:
+            app.dependency_overrides.clear()
+
 
 class TestVectorStoreIngestEndpoint:
     """Tests for /vectordb/ingest endpoint."""

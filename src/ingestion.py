@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from llama_index.core import VectorStoreIndex, Document
-from llama_index.core.schema import TextNode
+from llama_index.core.schema import QueryBundle, TextNode
 from llama_index.core.embeddings import BaseEmbedding
 
 from llamaindex_models import get_embedding_model
@@ -112,11 +112,15 @@ class VectorStoreManager:
             self.create_or_load_index()
 
         nodes = [
-            TextNode(text=doc.get_content())
+            TextNode(text=doc.get_content(), metadata=doc.metadata)
             for doc in documents
         ]
         self.index.insert_nodes(nodes)
         return len(nodes)
+
+    def generate_query_embedding(self, query_str: str) -> list[float]:
+        """Generate an embedding vector for a query string."""
+        return self.embedding_model.get_query_embedding(query_str)
 
     def ingest_from_source(self, source: str = DEFAULT_PASSAGES_SOURCE, limit: int | None = None) -> int:
         """Load documents from a source and add them to the vector store.
@@ -152,13 +156,19 @@ class VectorStoreManager:
             "persist_dir": str(self.persist_dir),
         }
 
-    def query(self, query_str: str, top_k: int = 5) -> list[dict[str, Any]]:
-        """Query the vector store for similar documents.
-        
+    def retrieve(
+        self,
+        query_str: str,
+        top_k: int = 5,
+        query_embedding: list[float] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Retrieve similar documents for a query.
+
         Args:
             query_str: Query string.
             top_k: Number of top results to return.
-            
+            query_embedding: Optional precomputed embedding for explainable flow.
+
         Returns:
             List of retrieved document results.
         """
@@ -166,12 +176,22 @@ class VectorStoreManager:
             return []
 
         retriever = self.index.as_retriever(similarity_top_k=top_k)
-        results = retriever.retrieve(query_str)
+        query_bundle = QueryBundle(query_str=query_str, embedding=query_embedding)
+        results = retriever.retrieve(query_bundle)
 
         return [
             {
-                "text": node.get_content(),
+                "text": node.node.get_content(),
                 "score": node.score,
+                "metadata": node.node.metadata,
             }
             for node in results
         ]
+
+    def query(self, query_str: str, top_k: int = 5) -> list[dict[str, Any]]:
+        """Query the vector store for similar documents."""
+        if self.index is None:
+            return []
+
+        query_embedding = self.generate_query_embedding(query_str)
+        return self.retrieve(query_str=query_str, top_k=top_k, query_embedding=query_embedding)
